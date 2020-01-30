@@ -1,0 +1,185 @@
+## TauGC Tuxedo2 v. 1.0 - Jan 2020
+
+###############################################################################
+
+## SET WORKDIR
+BASE_DIR = "fastq"
+HOME_DIR = "/home/user"
+TOOL_DIR = HOME_DIR + "/tools"
+
+## SET TOOLDIR
+TRIMMO_DIR= TOOL_DIR + "/Trimmomatic-0.38"
+FASTQC_DIR= TOOL_DIR + "/FastQC"
+SAMTOOLS_DIR=""
+HISAT2_DIR= TOOL_DIR + "/hisat2-2.1.0"
+STRINGTIE_DIR= TOOL_DIR + "/stringtie-1.3.6.Linux_x86_64"
+EAUTILS_DIR= TOOL_DIR + "/ExpressionAnalysis-ea-utils-bd148d4/clipper"
+RSEQC_DIR= TOOL_DIR + "/RSeQC-2.6.4/scripts"
+
+## SET VARIABLES
+reference_dir= "/references/soybean/Glycine_max/Ensembl/Gm01"
+hisat_reference= reference_dir + "/Sequence/HiSatIndex/Gm01"
+stringtie_annotation= reference_dir + "/Annotation/Genes/genes.gtf"
+illuminaclip = "TruSeq3-PE-2.fa"
+leading_trailing = "5"
+sliding_window = "4:15"
+min_length = "75"
+
+################################################################################
+
+## samples
+
+SAMPLES,= glob_wildcards("fastq/{smp}_R1_001.fastq.gz")
+NB_SAMPLES = len(SAMPLES)
+
+## rules
+
+rule all:
+	input:
+		expand("fastq/{smp}_R{num}_001_fastqc.zip", smp=SAMPLES, num=["1","2"]),
+		expand("fastq/{smp}_R{num}_001_trim_paired_fastqc.zip", smp=SAMPLES, num=["1","2"]),
+		"mergelist.txt",
+		"/home/jonas/references/soybean/Glycine_max/Ensembl/Gm01/Annotation/Genes/tincheck",
+		"/home/jonas/references/soybean/Glycine_max/Ensembl/Gm01/Annotation/Genes/genecoveragecheck",
+		"/home/jonas/references/soybean/Glycine_max/Ensembl/Gm01/Annotation/Genes/genes.bed",
+		expand("fastq/{smp}_001_trim_paired_aligned_sorted.bam.bai", smp=SAMPLES),
+		expand("fastq/ballgown/{smp}/{smp}_001_trim_paired_aligned_sorted.gtf", smp=SAMPLES),
+		expand("fastq/{smp}_001_trim_paired_aligned_sorted.gtf", smp=SAMPLES)		
+
+
+ruleorder: pre_trim_fastq > trim_fastq > post_trim_fastq > stringtie_run > stringtie_createmergelist > stringtie_merge > stringtie_ballgown
+
+rule pre_trim_fastq:
+	input:
+		"{BASE_DIR}/{smp}_R1_001.fastq.gz",
+		"{BASE_DIR}/{smp}_R2_001.fastq.gz"
+	output:
+		"{BASE_DIR}/{smp}_R1_001_fastqc.zip",
+		"{BASE_DIR}/{smp}_R2_001_fastqc.zip"
+	shell:"""
+		{FASTQC_DIR}/fastqc --outdir {BASE_DIR} -f fastq {input}
+	"""
+
+rule trim_fastq:
+	input:
+		fastqR1="{BASE_DIR}/{smp}_R1_001.fastq.gz",
+		fastqR2="{BASE_DIR}/{smp}_R2_001.fastq.gz"
+	output:
+		fastqR1_trim= "{BASE_DIR}/{smp}_R1_001_trim_paired.fastq.gz",
+		fastqR2_trim= "{BASE_DIR}/{smp}_R2_001_trim_paired.fastq.gz",
+		fastqR1_unpaired= temp("{BASE_DIR}/{smp}_R1_001_trim_unpaired.fastq.gz"),
+		fastqR2_unpaired= temp("{BASE_DIR}/{smp}_R2_001_trim_unpaired.fastq.gz")
+	shell:"""
+		java -jar {TRIMMO_DIR}/trimmomatic-0.38.jar PE -phred33 {input.fastqR1} {input.fastqR2} {output.fastqR1_trim} {output.fastqR1_unpaired} {output.fastqR2_trim} {output.fastqR2_unpaired} ILLUMINACLIP:{illuminaclip}:2:30:10 LEADING:{leading_trailing} TRAILING:{leading_trailing} SLIDINGWINDOW:{sliding_window} MINLEN:{min_length} 2>{BASE_DIR}/{wildcards.smp}_trimlog
+		rm {input.fastqR1} {input.fastqR2}
+	"""
+
+rule post_trim_fastq:
+	input:
+		 "{BASE_DIR}/{smp}_R1_001_trim_paired.fastq.gz",
+		 "{BASE_DIR}/{smp}_R2_001_trim_paired.fastq.gz"
+	output:
+		"{BASE_DIR}/{smp}_R1_001_trim_paired_fastqc.zip",
+		"{BASE_DIR}/{smp}_R2_001_trim_paired_fastqc.zip"
+	shell:"""
+		{FASTQC_DIR}/fastqc --outdir {BASE_DIR} -f fastq {input}
+	"""
+
+rule alignment_hisat2:
+	input:
+		fastqR1_trim= "{BASE_DIR}/{smp}_R1_001_trim_paired.fastq.gz",
+		fastqR2_trim= "{BASE_DIR}/{smp}_R2_001_trim_paired.fastq.gz"
+	output:
+		hisat_sam= temp("{BASE_DIR}/{smp}_001_trim_paired_aligned.sam")
+	threads:8
+	shell:"""
+		{HISAT2_DIR}/hisat2 -p {threads} --dta --rna-strandness RF -x {hisat_reference} -1 {input.fastqR1_trim} -2 {input.fastqR2_trim} -S {output.hisat_sam} 2>"{output.hisat_sam}_summary.txt"
+	"""
+
+rule samtools_samtobam_sort_index:
+	input:
+		hisat_sam="{BASE_DIR}/{smp}_001_trim_paired_aligned.sam"
+	output:
+		bam=("{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.bam")
+	threads:8
+	shell:"""
+		{SAMTOOLS_DIR}samtools view -S -b {input.hisat_sam} | {SAMTOOLS_DIR}samtools sort -o {output.bam}
+	"""
+
+rule samtools_index:
+	input:
+		bam="{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.bam"
+	output:
+		"{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.bam.bai"
+	shell:"""
+		{SAMTOOLS_DIR}samtools index {input.bam}
+	"""
+
+rule reference_gtf_to_bed:
+	output:
+		reference_bed= "{reference_dir}/Annotation/Genes/genes.bed"
+	shell:"""
+		{EAUTILS_DIR}/gtf2bed {stringtie_annotation} > {output.reference_bed}
+	"""
+
+rule rseqc_tin:
+	input:
+		reference_bed= "{reference_dir}/Annotation/Genes/genes.bed",
+		bam=expand("fastq/{smp}_001_trim_paired_aligned_sorted.bam.bai", smp=SAMPLES)
+	output:
+		temp("{reference_dir}/Annotation/Genes/tincheck")
+	shell:"""
+		python {RSEQC_DIR}/tin.py -i {BASE_DIR}/ -r {input.reference_bed} 1>{output}
+		ls {input.bam}
+	"""
+
+rule rseqc_genecoverage:
+	input:
+		reference_bed= "{reference_dir}/Annotation/Genes/genes.bed",
+		bam=expand("fastq/{smp}_001_trim_paired_aligned_sorted.bam.bai", smp=SAMPLES)
+	output:
+		temp("{reference_dir}/Annotation/Genes/genecoveragecheck")
+	shell:"""
+		python {RSEQC_DIR}/geneBody_coverage.py -r {input.reference_bed} -i {BASE_DIR}/ -o rseqc_genecoverage 1>{output}
+		ls {input.bam}
+	"""
+
+rule stringtie_run:
+	input:
+		bam= "{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.bam"
+	output:
+		gtf= "{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.gtf"
+	threads:8
+	shell:"""
+		{STRINGTIE_DIR}/stringtie -p {threads} -e -G {stringtie_annotation} -o {output.gtf} -l {wildcards.smp} {input.bam}
+	"""
+
+rule stringtie_createmergelist:
+	input:
+		expand("fastq/{smp}_001_trim_paired_aligned_sorted.gtf", smp=SAMPLES)
+	output:
+		mergelist= "mergelist.txt"
+	shell:"""
+		ls {input} >>{output.mergelist}
+	"""
+
+rule stringtie_merge:
+	input: 
+		mergelist= "mergelist.txt"
+	output:
+		gtf_merged= "{BASE_DIR}/stringtie_merged.gtf"
+	threads:8
+	shell:"""
+		{STRINGTIE_DIR}/stringtie --merge -p {threads} -G {stringtie_annotation} -o {output.gtf_merged} {input.mergelist}
+	"""
+
+rule stringtie_ballgown:
+	input:
+		gtf_merged= "{BASE_DIR}/stringtie_merged.gtf",
+		bam= "{BASE_DIR}/{smp}_001_trim_paired_aligned_sorted.bam"
+	output:
+		ballgown= "{BASE_DIR}/ballgown/{smp}/{smp}_001_trim_paired_aligned_sorted.gtf"
+	threads:8
+	shell:"""
+		{STRINGTIE_DIR}/stringtie -e -B -p {threads} -G {input.gtf_merged} -o {output.ballgown} {input.bam}
+	"""
